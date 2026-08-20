@@ -2768,6 +2768,44 @@ function doErase(ev){
 // Rasterize the live DOM text layer instead of rebuilding it with fillText().
 // This keeps browser font shaping, hinting, mixed CJK/Latin baselines,
 // fractional sizes, line-height and alignment consistent with the preview.
+// The page's own @font-face rules point at external files (fonts/*.woff2)
+// to keep index.html small. That works fine for on-screen editing, but the
+// export step below builds a standalone <svg><foreignObject> and converts
+// it to an image — and a relative url() inside that SVG's embedded CSS does
+// not resolve back to the fonts/ folder, so exports would silently fall
+// back to a default font. To fix that without re-embedding the fonts in
+// the page itself, we fetch the three files once, right before the first
+// export, and cache them as base64 data URIs — then export-time CSS uses
+// those instead of the page's external @font-face rules.
+let __exportFontDataUriCache = null;
+async function getExportFontFacesCss(){
+  if(__exportFontDataUriCache) return __exportFontDataUriCache;
+  const files = [
+    ['ShopeeFont-Regular','fonts/ShopeeNotoSans_content_-Regular.woff2'],
+    ['ShopeeFont-Medium','fonts/ShopeeNotoSans_content_-Medium.woff2'],
+    ['ShopeeFont-Bold','fonts/ShopeeNotoSans_content_-Bold.woff2'],
+  ];
+  const rules = [];
+  for(const [family,path] of files){
+    try{
+      const res = await fetch(path);
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      const buf = await res.arrayBuffer();
+      let binary='';
+      const bytes = new Uint8Array(buf);
+      const chunk = 8192;
+      for(let i=0;i<bytes.length;i+=chunk){
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+      }
+      const b64 = btoa(binary);
+      rules.push(`@font-face{font-family:"${family}";src:url(data:font/woff2;charset=utf-8;base64,${b64}) format("woff2");font-weight:normal;font-style:normal;}`);
+    }catch(err){
+      console.error('匯出用字型讀取失敗（將維持外部連結，匯出結果可能無法套用字體）：',family,path,err);
+    }
+  }
+  __exportFontDataUriCache = rules.join('\n');
+  return __exportFontDataUriCache;
+}
 async function renderDomTextLayerToCanvas(octx){
   const boxes = [...document.querySelectorAll('.tbox')];
   if(!boxes.length) return;
@@ -2781,6 +2819,7 @@ async function renderDomTextLayerToCanvas(octx){
     try{ return [...sheet.cssRules].map(rule=>rule.cssText).join('\n'); }
     catch(err){ return ''; }
   }).join('\n');
+  const exportFontFacesCss = await getExportFontFacesCss();
   const html = boxes.map(box=>{
     const disp = box.querySelector('.tbox-display');
     const cs = getComputedStyle(disp);
@@ -2807,7 +2846,7 @@ async function renderDomTextLayerToCanvas(octx){
     ].join(';');
     return `<div xmlns="http://www.w3.org/1999/xhtml" style="${escapeXml(style)}">${escapeXml(box.getText())}</div>`;
   }).join('');
-  const safeCss = cssText.replace(/<\/style/gi,'<\\/style');
+  const safeCss = (cssText+'\n'+exportFontFacesCss).replace(/<\/style/gi,'<\\/style');
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${STAGE_W}" height="${STAGE_H}" viewBox="0 0 ${STAGE_W} ${STAGE_H}"><foreignObject x="0" y="0" width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="position:relative;width:${STAGE_W}px;height:${STAGE_H}px;overflow:hidden"><style>${safeCss}</style>${html}</div></foreignObject></svg>`;
   // A file:// page cannot reliably reload a blob:null URL. A data URL keeps
   // the SVG self-contained and works in both the in-app preview and Chrome.
